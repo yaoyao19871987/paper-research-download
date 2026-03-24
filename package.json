@@ -1,0 +1,33 @@
+{
+  "name": "paper-download",
+  "version": "1.0.0",
+  "description": "CNKI search pipeline and Sixue legacy download automation",
+  "main": "src/download-paper.js",
+  "scripts": {
+    "save-session": "node src/save-session.js",
+    "download": "node src/download-paper.js",
+    "legacy-download": "node src/legacy-sixue-download.js",
+    "pipeline": "node src/pipeline-runner.js",
+    "pipeline:dev": "set PAPER_ENV=dev&& node src/pipeline-runner.js",
+    "pipeline:test": "set PAPER_ENV=test&& node src/pipeline-runner.js",
+    "pipeline:prod": "set PAPER_ENV=prod&& node src/pipeline-runner.js",
+    "observed-pipeline": "node src/observed-topic-run.js",
+    "live": "node src/live-session.js",
+    "ui": "node src/ui-server.js",
+    "ui:test": "set PAPER_ENV=test&& node src/ui-server.js",
+    "ui:prod": "set PAPER_ENV=prod&& node src/ui-server.js"
+  },
+  "keywords": [
+    "playwright",
+    "automation",
+    "download"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "csv-parse": "^5.6.0",
+    "csv-stringify": "^6.5.2",
+    "dotenv": "^16.4.5",
+    "playwright": "^1.52.0"
+  }
+}

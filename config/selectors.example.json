@@ -1,0 +1,29 @@
+{
+  "login": {
+    "username": "input[name='username']",
+    "password": "input[name='password']",
+    "captcha": "input[name='yzm']",
+    "captchaImage": "img[title*='\u5237\u65b0'], img[src*='ValidateCode'], img[src*='captcha'], .captcha img",
+    "captchaRefresh": "img[title*='\u5237\u65b0'], a[title*='\u5237\u65b0'], [onclick*='refresh']",
+    "captchaSubmit": "#loginSubmit",
+    "submit": "#loginSubmit",
+    "successIndicator": ""
+  },
+  "paper": {
+    "downloadTrigger": "a[href*='download'], a[title*='download'], .download",
+    "preferredDownloadTriggers": [
+      "a:has-text('PDF1')",
+      "a:has-text('PDF2')",
+      "a:has-text('PDF\u4e0b\u8f7d')",
+      "a:has-text('\u70b9\u6b64\u4e0b\u8f7d')",
+      "a:has-text('\u70b9\u51fb\u4e0b\u8f7d')",
+      "a:has-text('\u4e0b\u8f7d')"
+    ],
+    "downloadReadyIndicator": "",
+    "countdownContainer": "body",
+    "captcha": "input[name='yzm'], input[name='captcha'], input[id*='captcha'], input[id*='verify']",
+    "captchaImage": "img[title*='\u5237\u65b0'], img[src*='captcha'], img[src*='verify'], .captcha img",
+    "captchaRefresh": "img[title*='\u5237\u65b0'], a[title*='\u5237\u65b0'], [onclick*='refresh']",
+    "captchaSubmit": "button:has-text('\u63d0\u4ea4'), button:has-text('\u786e\u5b9a'), input[type='submit']"
+  }
+}

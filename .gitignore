@@ -1,0 +1,42 @@
+# Node
+node_modules/
+npm-debug.log*
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+
+# Local env / secrets
+.env
+.env.local
+.env.dev
+.env.test
+.env.prod
+state/
+!state/.gitkeep
+
+# Runtime outputs
+outputs/
+downloads/
+*.log
+
+# Browser / generated artifacts
+*.png
+*.jpg
+*.jpeg
+*.html
+
+# Project-specific generated data
+python-scraper/cnkiLRspider/outputs/
+work-reports/
+steel-dev_steel-mcp-server/
+config/selectors.json
+
+# IDE
+.vscode/
+.idea/
+Thumbs.db
+Desktop.ini
