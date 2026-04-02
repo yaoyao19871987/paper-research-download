@@ -85,6 +85,8 @@ CANDIDATE_FIELDS = [
   "keep_reason",
   "abstract",
   "page_url",
+  "db_code",
+  "file_name",
   "user_select",
 ]
 
@@ -352,6 +354,8 @@ class ResearchPipeline:
         "keep_reason": row.get("keep_reason", ""),
         "abstract": row.get("abstract", ""),
         "page_url": row.get("page_url", ""),
+        "db_code": row.get("db_code", ""),
+        "file_name": row.get("file_name", ""),
         "user_select": row.get("user_select", ""),
       }
       for row in rows

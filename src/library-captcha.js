@@ -6,16 +6,7 @@ const { ensureDir, getNumEnv, timestampString } = require("./common");
 const ROOT_DIR = path.resolve(__dirname, "..");
 
 function resolveOcrScript() {
-  const candidates = [
-    path.join(ROOT_DIR, "Chinese paper search", "cnkiLRspider", "kimi_image_ocr.py"),
-    path.join(ROOT_DIR, "python-scraper", "cnkiLRspider", "kimi_image_ocr.py")
-  ];
-  for (const candidate of candidates) {
-    if (fs.existsSync(candidate)) {
-      return candidate;
-    }
-  }
-  return candidates[0];
+  return path.join(ROOT_DIR, "python-scraper", "cnkiLRspider", "kimi_image_ocr.py");
 }
 
 const OCR_SCRIPT = resolveOcrScript();

@@ -1,172 +1,137 @@
 # paper-download
 
-一个围绕 CNKI 文献检索与思学图书馆下载的自动化项目，当前包含两条主线：
+一个围绕 CNKI 选题检索与思学图书馆代理下载的自动化仓库。
 
-1. `Chinese paper search/cnkiLRspider`
-   - 研究主题 -> Kimi 讨论检索策略 -> CNKI 检索 -> 结果整理 -> 候选下载队列
+当前保留两条主链路：
+
+1. `python-scraper/cnkiLRspider`
+   - 负责选题分析、检索策略生成、CNKI 检索、候选论文整理、导出下载队列。
 2. `src`
-   - 思学图书馆登录 -> 文献下载 -> 入口1 -> 检索1 -> 代理 CNKI -> 下载页 -> 文件落盘
+   - 负责图书馆登录态复用、验证码处理、代理 CNKI 页面跳转和实际下载。
 
-项目当前面向 Windows + PowerShell 环境维护。
-
-## 当前状态
-
-已经落地的能力：
-
-- 思学图书馆登录态复用
-- 登录验证码截图 -> Kimi OCR -> 自动填写
-- 思学老路径下载模块
-- 代理 CNKI 检索
-- `篇关摘` 固定检索流程
-- CNKI 高级检索 / 专业检索自动化
-- CNKI 滑块验证码处理
-- 研究主题到 `papers_for_download.csv` / `download_queue.csv` 的管线
-
-当前推荐的使用方式：
-
-- 搜索与候选整理：走 Python 管线
-- 真正下载：走 Node.js 的老路径下载模块
+仓库已经按“当前主流程可维护”做过一次清理。旧版调试入口、历史说明文档和阶段性记录已移除，保留的是现在还在用的主代码和运行所需配置模板。
 
 ## 目录结构
 
 ```text
 paper-download/
-├─ src/
-│  ├─ legacy-sixue-download.js     # 思学老路径下载模块
-│  ├─ download-paper.js            # 旧的直接论文页下载器
-│  ├─ library-auth.js              # 思学登录与登录态复用
-│  ├─ library-captcha.js           # 文本验证码截图 + Kimi OCR
-│  ├─ live-session.js              # 可视化人工接管调试入口
-│  └─ common.js                    # 通用工具
-├─ Chinese paper search/
+├─ config/
+│  └─ selectors.example.json
+├─ python-scraper/
 │  └─ cnkiLRspider/
-│     ├─ research_pipeline.py      # 搜索主流程
-│     ├─ full_research_download_pipeline.py
+│     ├─ README_LOCAL.md
+│     ├─ research_pipeline.py
 │     ├─ cnki_entry.py
 │     ├─ cnki_captcha.py
 │     ├─ cnki_common.py
-│     └─ README_LOCAL.md
-├─ downloads/                      # 下载落盘目录
-├─ outputs/                        # 运行截图、HTML、日志
-├─ state/                          # 登录态，如 auth.json
-├─ selectors.json                  # 当前选择器配置
-├─ selectors.example.json          # 选择器模板
-└─ .env.example                    # 环境变量模板
+│     ├─ kimi_client.py
+│     └─ generate_work_summary_report.py
+├─ src/
+│  ├─ build-heuristic-queue.js
+│  ├─ common.js
+│  ├─ legacy-sixue-download.js
+│  ├─ library-auth.js
+│  ├─ library-captcha.js
+│  ├─ pipeline-runner.js
+│  ├─ site-credential-vault.py
+│  └─ site-credentials.js
+├─ downloads/          # 已下载论文，默认不纳入 Git
+├─ outputs/            # 截图、HTML、临时运行产物，默认不纳入 Git
+├─ state/              # 登录态等本地状态，默认不纳入 Git
+├─ work-reports/       # 运行总结与工作报告，默认不纳入 Git
+├─ .env.example
+├─ .env.dev.example
+├─ .env.test.example
+├─ .env.prod.example
+├─ package.json
+└─ README.md
 ```
 
 ## 安装
+
+Node 侧：
 
 ```powershell
 cd D:\Code\paper-download
 npm install
 ```
 
-Python 管线依赖见：
+Python 侧：
 
-[README_LOCAL.md](/D:/Code/paper-download/Chinese%20paper%20search/cnkiLRspider/README_LOCAL.md)
+```powershell
+cd D:\Code\paper-download\python-scraper\cnkiLRspider
+python -m pip install -r requirements.txt
+```
 
-## 配置
+## 初始配置
 
-1. 复制环境变量模板
+1. 复制环境变量模板。
 
 ```powershell
 Copy-Item .env.example .env
 ```
 
-2. 复制选择器模板
+2. 复制选择器模板。
 
 ```powershell
-Copy-Item selectors.example.json selectors.json
+Copy-Item .\config\selectors.example.json .\config\selectors.json
 ```
 
-3. 根据实际页面微调 `selectors.json`
-
-## 主要脚本
-
-### 1. 思学老路径下载
-
-这是当前建议保留和继续演进的下载入口：
+3. 复制选题模板。
 
 ```powershell
-node .\src\legacy-sixue-download.js
+Copy-Item .\python-scraper\cnkiLRspider\topic.example.txt .\python-scraper\cnkiLRspider\topic.txt
 ```
 
-也可以用环境变量指定查询词：
+4. 根据当前站点页面结构调整 `config/selectors.json`，并把实际选题写入 `python-scraper/cnkiLRspider/topic.txt`。
+
+## 常用命令
+
+单篇下载验证：
 
 ```powershell
-$env:LEGACY_QUERY = "《岳阳楼记》中的忧乐精神与儒家文化探析"
-$env:LEGACY_TITLE = "《岳阳楼记》中的忧乐精神与儒家文化探析"
-node .\src\legacy-sixue-download.js
+npm run legacy-download
 ```
 
-它的链路是：
-
-`思学首页 -> 文献下载 -> 入口1 -> 检索1 -> 代理CNKI -> 篇关摘 -> 结果 -> cdown下载页 -> 文件`
-
-### 2. 思学登录与会话复用
-
-登录逻辑在：
-
-- [library-auth.js](/D:/Code/paper-download/src/library-auth.js)
-- [library-captcha.js](/D:/Code/paper-download/src/library-captcha.js)
-
-行为是：
-
-- 优先复用 `AUTH_STATE_PATH`
-- 登录态失效时，自动重新登录
-- 遇到文本验证码时，自动截图并调用 Kimi OCR
-
-### 3. 研究检索主流程
+完整流水线：
 
 ```powershell
-cd "D:\Code\paper-download\Chinese paper search\cnkiLRspider"
+npm run pipeline
+```
+
+按环境运行：
+
+```powershell
+npm run pipeline:dev
+npm run pipeline:test
+npm run pipeline:prod
+```
+
+仅运行 Python 检索链路：
+
+```powershell
+cd D:\Code\paper-download\python-scraper\cnkiLRspider
 python research_pipeline.py --topic-file .\topic.txt
 ```
 
-产物通常包括：
+## Git 约定
 
-- `strategy_round1.json`
-- `papers_master.csv`
-- `papers_for_download.csv`
-- `download_queue.csv`
+以下内容默认不纳入版本控制：
 
-## 人类化节奏约束
+- `.env*`
+- `config/selectors.json`
+- `python-scraper/cnkiLRspider/topic.txt`
+- `downloads/`
+- `outputs/`
+- `state/`
+- `work-reports/`
+- `python-scraper/cnkiLRspider/outputs/`
 
-思学老路径下载模块已经内置：
+这意味着仓库提交时应只包含代码、配置模板和必要说明，不包含真实账号、登录态、下载产物和运行现场。
 
-- 点击前随机停顿
-- 点击后随机停顿
-- 页面跳转后额外观察
-- 下载页单独处理
+## 维护原则
 
-设计原则：
-
-- 稳定优先
-- 准确优先
-- 不追求盲目提速
-
-## GitHub 迁移建议
-
-迁移前先看：
-
-[docs/GITHUB_MIGRATION.md](/D:/Code/paper-download/docs/GITHUB_MIGRATION.md)
-
-重点注意：
-
-- 不要提交 `.env`
-- 不要提交 `state/auth.json`
-- 不要提交 `outputs/`、`downloads/`
-- 不要提交任何真实账号密码
-
-## 重要文档
-
-- [思学老路径操作说明](/D:/Code/paper-download/操作流程-思学图书馆到知网下载.md)
-- [本地运行说明](/D:/Code/paper-download/Chinese%20paper%20search/cnkiLRspider/README_LOCAL.md)
-- [变更记录](/D:/Code/paper-download/CHANGELOG.md)
-
-## 当前建议
-
-如果你之后要在新窗口直接跑，建议优先走这两步：
-
-1. 先用 `legacy-sixue-download.js` 单独验证思学老路径
-2. 再把它接到下载队列里做批量下载
+- 以 `src/pipeline-runner.js` 和 `src/legacy-sixue-download.js` 作为当前 Node 主入口。
+- 以 `python-scraper/cnkiLRspider/research_pipeline.py` 作为当前 Python 主入口。
+- 新增流程说明时，优先更新本 README 或 `python-scraper/cnkiLRspider/README_LOCAL.md`，不要再堆阶段性纪要型文档。
+- 已下载论文、运行日志和历史状态默认保留在本地，不作为这次仓库清理对象。

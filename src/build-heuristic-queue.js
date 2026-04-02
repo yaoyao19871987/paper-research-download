@@ -17,6 +17,8 @@ const CANDIDATE_FIELDS = [
   "keep_reason",
   "abstract",
   "page_url",
+  "db_code",
+  "file_name",
   "user_select"
 ];
 
@@ -272,6 +274,8 @@ function buildCandidateRows(rows, options) {
     keep_reason: row.keep_reason || "",
     abstract: row.abstract || "",
     page_url: row.page_url || "",
+    db_code: row.db_code || "",
+    file_name: row.file_name || "",
     user_select: selectedKeys.has(`${normalizeTitle(row.title)}|${String(row.publish_year || "")}`) ? "yes" : ""
   }));
 

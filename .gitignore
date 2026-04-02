@@ -16,7 +16,6 @@ __pycache__/
 .env.test
 .env.prod
 state/
-!state/.gitkeep
 
 # Runtime outputs
 outputs/
@@ -32,8 +31,8 @@ downloads/
 # Project-specific generated data
 python-scraper/cnkiLRspider/outputs/
 work-reports/
-steel-dev_steel-mcp-server/
 config/selectors.json
+python-scraper/cnkiLRspider/topic.txt
 
 # IDE
 .vscode/

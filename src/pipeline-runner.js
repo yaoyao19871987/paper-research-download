@@ -14,11 +14,7 @@ const {
 const ROOT_DIR = path.resolve(__dirname, "..");
 function resolveSearchDir() {
   const envDir = process.env.CNKI_SEARCH_DIR ? path.resolve(process.env.CNKI_SEARCH_DIR) : "";
-  const candidates = [
-    envDir,
-    path.join(ROOT_DIR, "Chinese paper search", "cnkiLRspider"),
-    path.join(ROOT_DIR, "python-scraper", "cnkiLRspider")
-  ].filter(Boolean);
+  const candidates = [envDir, path.join(ROOT_DIR, "python-scraper", "cnkiLRspider")].filter(Boolean);
 
   for (const candidate of candidates) {
     if (fs.existsSync(path.join(candidate, "research_pipeline.py"))) {
@@ -27,7 +23,7 @@ function resolveSearchDir() {
   }
 
   throw new Error(
-    "Could not locate cnkiLRspider. Set CNKI_SEARCH_DIR or place the scraper in Chinese paper search/cnkiLRspider or python-scraper/cnkiLRspider."
+    "Could not locate cnkiLRspider. Set CNKI_SEARCH_DIR or place the scraper in python-scraper/cnkiLRspider."
   );
 }
 
@@ -376,7 +372,8 @@ function autoSelectCandidates(rows, limit) {
   const selected = indexedRows
     .filter(({ row }) => {
       const label = String(row.label || "").trim().toLowerCase();
-      return Boolean(row.title && row.page_url && label !== "teaching");
+      const hasStableReference = Boolean(row.page_url || row.file_name || row.paper_id);
+      return Boolean(row.title && hasStableReference && label !== "teaching");
     })
     .sort((left, right) => {
       const scoreDiff = parseScore(right.row.final_score) - parseScore(left.row.final_score);
@@ -839,7 +836,14 @@ async function runLegacyDownload(state, session, row, index, options) {
       const result = await runWithTeeLog(logPath, () =>
         downloadOneFromLegacySixueSession(session, {
           query: title,
-          targetTitle: title
+          targetTitle: title,
+          targetAuthors: row.authors || "",
+          targetJournal: row.journal || "",
+          targetYear: row.publish_year || "",
+          targetPaperId: row.paper_id || "",
+          targetDbCode: row.db_code || "",
+          targetFileName: row.file_name || "",
+          targetPageUrl: row.page_url || ""
         })
       );
       resetAuthRetryMetadata(state);

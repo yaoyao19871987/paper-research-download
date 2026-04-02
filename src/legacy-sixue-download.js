@@ -146,6 +146,239 @@ function normalizeText(value) {
     .toLowerCase();
 }
 
+function firstNonEmpty(...values) {
+  for (const value of values) {
+    const text = String(value || "").trim();
+    if (text) {
+      return text;
+    }
+  }
+  return "";
+}
+
+function extractYear(value) {
+  const match = String(value || "").match(/((?:19|20)\d{2})/);
+  return match ? match[1] : "";
+}
+
+function splitNormalizedPeople(value) {
+  return String(value || "")
+    .split(/[;；,，、/|]+/g)
+    .map((item) => normalizeText(item))
+    .filter(Boolean);
+}
+
+function deriveIdentityFromPageUrl(pageUrl) {
+  const text = String(pageUrl || "").trim();
+  if (!text) {
+    return { dbCode: "", fileName: "" };
+  }
+
+  try {
+    const url = new URL(text);
+    const dbCode = firstNonEmpty(url.searchParams.get("dbcode"), url.searchParams.get("dbname")).toUpperCase();
+    const fileName = firstNonEmpty(url.searchParams.get("filename"), url.searchParams.get("name")).toUpperCase();
+    return { dbCode, fileName };
+  } catch {
+    return { dbCode: "", fileName: "" };
+  }
+}
+
+function parseProxyHrefMetadata(rawHref) {
+  const href = decodeHtmlEntities(String(rawHref || "").trim());
+  if (!href) {
+    return {
+      href: "",
+      dbCode: "",
+      fileName: "",
+      title: "",
+      authors: "",
+      journal: "",
+      publishDate: "",
+      publishYear: ""
+    };
+  }
+
+  try {
+    const parsed = new URL(href);
+    const ddata = firstNonEmpty(parsed.searchParams.get("ddata"), parsed.searchParams.get("DData"));
+    const parts = ddata ? ddata.split("|").map((item) => maybeDecodeURIComponent(item)) : [];
+    const fileName = firstNonEmpty(parts[0], parsed.searchParams.get("filename"), parsed.searchParams.get("name")).trim();
+    const dbCode = firstNonEmpty(parts[1], parsed.searchParams.get("dbcode"), parsed.searchParams.get("dbname")).trim();
+    const title = firstNonEmpty(parts[2]);
+    const authors = firstNonEmpty(parts[3]);
+    const journal = firstNonEmpty(parts[4]);
+    const publishDate = firstNonEmpty(parts[5]);
+
+    return {
+      href,
+      dbCode: dbCode.toUpperCase(),
+      fileName: fileName.toUpperCase(),
+      title,
+      authors,
+      journal,
+      publishDate,
+      publishYear: extractYear(publishDate)
+    };
+  } catch {
+    return {
+      href,
+      dbCode: "",
+      fileName: "",
+      title: "",
+      authors: "",
+      journal: "",
+      publishDate: "",
+      publishYear: ""
+    };
+  }
+}
+
+function buildTargetMetadata(options = {}) {
+  const title = firstNonEmpty(options.targetTitle, options.query);
+  const derivedIdentity = deriveIdentityFromPageUrl(options.targetPageUrl);
+  const dbCode = firstNonEmpty(options.targetDbCode, derivedIdentity.dbCode).toUpperCase();
+  const fileName = firstNonEmpty(options.targetFileName, derivedIdentity.fileName).toUpperCase();
+
+  return {
+    title,
+    normalizedTitle: normalizeText(title),
+    authors: String(options.targetAuthors || "").trim(),
+    authorTerms: splitNormalizedPeople(options.targetAuthors),
+    journal: String(options.targetJournal || "").trim(),
+    normalizedJournal: normalizeText(options.targetJournal || ""),
+    publishYear: extractYear(options.targetYear),
+    paperId: String(options.targetPaperId || "").trim().toUpperCase(),
+    dbCode,
+    fileName,
+    pageUrl: String(options.targetPageUrl || "").trim()
+  };
+}
+
+function scoreResultCandidate(candidate, target) {
+  let score = 0;
+  const reasons = [];
+  const candidateIdentity = `${candidate.dbCode || ""}${candidate.fileName || ""}`.toUpperCase();
+
+  if (!candidate.normalizedTitle) {
+    score -= 200;
+    reasons.push("empty-title");
+  }
+
+  if (target.fileName && candidate.fileName) {
+    if (target.fileName === candidate.fileName) {
+      score += 240;
+      reasons.push("file-name");
+    } else {
+      score -= 45;
+    }
+  }
+
+  if (target.dbCode && candidate.dbCode) {
+    if (target.dbCode === candidate.dbCode) {
+      score += 40;
+      reasons.push("db-code");
+    } else if (target.fileName) {
+      score -= 10;
+    }
+  }
+
+  if (target.paperId && candidateIdentity && target.paperId === candidateIdentity) {
+    score += 260;
+    reasons.push("paper-id");
+  }
+
+  if (target.normalizedTitle && candidate.normalizedTitle === target.normalizedTitle) {
+    score += 120;
+    reasons.push("exact-title");
+  } else if (target.normalizedTitle && candidate.normalizedTitle.includes(target.normalizedTitle)) {
+    score += 90;
+    reasons.push("title-contains-target");
+  } else if (target.normalizedTitle && target.normalizedTitle.includes(candidate.normalizedTitle) && candidate.normalizedTitle) {
+    score += 70;
+    reasons.push("target-contains-title");
+  } else if (!target.normalizedTitle && candidate.normalizedTitle) {
+    score += 10;
+  }
+
+  if (target.authorTerms.length && candidate.authorTerms.length) {
+    const overlap = candidate.authorTerms.filter((term) => target.authorTerms.includes(term)).length;
+    if (overlap) {
+      score += overlap * 22;
+      reasons.push(`author-overlap:${overlap}`);
+    }
+  }
+
+  if (target.normalizedJournal && candidate.normalizedJournal) {
+    if (target.normalizedJournal === candidate.normalizedJournal) {
+      score += 28;
+      reasons.push("journal");
+    } else if (candidate.normalizedJournal.includes(target.normalizedJournal)) {
+      score += 18;
+      reasons.push("journal-contains");
+    }
+  }
+
+  if (target.publishYear && candidate.publishYear) {
+    if (target.publishYear === candidate.publishYear) {
+      score += 14;
+      reasons.push("year");
+    } else {
+      score -= 3;
+    }
+  }
+
+  return { score, reasons };
+}
+
+async function extractResultCandidate(rowLocator, index) {
+  const titleLocator = rowLocator
+    .locator("td.name a.fz14, td.name a[href*='papermao.net/cdown'], dd h6 a.fz14, dd h6 a[href*='papermao.net/cdown']")
+    .first();
+  const titleExists = (await titleLocator.count().catch(() => 0)) > 0;
+  if (!titleExists) {
+    return null;
+  }
+
+  const downloadLocator = rowLocator
+    .locator("td.operat a.downloadlink, a.downloadlink[href*='papermao.net/cdown'], a.downloadlink")
+    .first();
+
+  const titleText = (await titleLocator.innerText().catch(() => "")).trim();
+  const titleHref = await titleLocator.getAttribute("href").catch(() => "");
+  const downloadHref = await downloadLocator.getAttribute("href").catch(() => "");
+  const titleMeta = parseProxyHrefMetadata(titleHref);
+  const downloadMeta = parseProxyHrefMetadata(downloadHref);
+  const authorText = (await rowLocator.locator("td.author").innerText().catch(() => "")).trim();
+  const sourceText = (await rowLocator.locator("td.source").innerText().catch(() => "")).trim();
+  const dateText = (await rowLocator.locator("td.date").innerText().catch(() => "")).trim();
+
+  const resolvedTitle = firstNonEmpty(titleText, downloadMeta.title, titleMeta.title);
+  const resolvedAuthors = firstNonEmpty(authorText, downloadMeta.authors, titleMeta.authors);
+  const resolvedJournal = firstNonEmpty(sourceText, downloadMeta.journal, titleMeta.journal);
+  const resolvedDate = firstNonEmpty(dateText, downloadMeta.publishDate, titleMeta.publishDate);
+  const resolvedDbCode = firstNonEmpty(downloadMeta.dbCode, titleMeta.dbCode).toUpperCase();
+  const resolvedFileName = firstNonEmpty(downloadMeta.fileName, titleMeta.fileName).toUpperCase();
+
+  return {
+    index,
+    rowLocator,
+    titleLocator,
+    downloadLocator,
+    titleText: resolvedTitle,
+    normalizedTitle: normalizeText(resolvedTitle),
+    authors: resolvedAuthors,
+    authorTerms: splitNormalizedPeople(resolvedAuthors),
+    journal: resolvedJournal,
+    normalizedJournal: normalizeText(resolvedJournal),
+    publishDate: resolvedDate,
+    publishYear: extractYear(resolvedDate),
+    dbCode: resolvedDbCode,
+    fileName: resolvedFileName,
+    href: firstNonEmpty(downloadMeta.href, titleMeta.href)
+  };
+}
+
 function asSelectorList(configValue, fallbacks = []) {
   if (Array.isArray(configValue)) {
     return [...configValue, ...fallbacks];
@@ -691,58 +924,80 @@ async function runProxySearch(page, query) {
   await humanPause(page, "after-fill-query", 800, 1800);
   await humanClick(page, page.locator(".search-btn").first(), "cnki-search-button");
   await page.waitForURL(/\/kns8s\/search/, { timeout: 120000 }).catch(() => {});
-  await page.waitForSelector("table.result-table-list, .result-table-list", { timeout: 120000 });
+  try {
+    await page.waitForSelector("table.result-table-list, .result-table-list", { timeout: 120000 });
+  } catch (error) {
+    const artifactDir = path.join(process.cwd(), "outputs", "legacy-sixue-download");
+    await savePageArtifacts(page, artifactDir, "proxy-cnki-results-timeout").catch(() => {});
+    throw error;
+  }
   await observeAfterNavigation(page, "proxy-cnki-results");
 }
 
-async function pickBestResult(page, targetTitle) {
-  const titleLinks = page.locator(
-    "#gridTable table.result-table-list td.name a[href*='papermao.net/cdown'], #gridTable table.result-table-list td.name a.fz14, table.result-table-list td.name a[href*='papermao.net/cdown'], table.result-table-list td.name a.fz14, .result-table-list td.name a[href*='papermao.net/cdown'], .result-table-list td.name a.fz14, dd h6 a[href*='papermao.net/cdown'], dd h6 a.fz14"
-  );
-  const linkCount = await titleLinks.count();
-  if (!linkCount) {
-    throw new Error("No CNKI result title links were found on proxy search results page.");
+async function pickBestResult(page, targetOptions = {}) {
+  const target = typeof targetOptions === "string" ? buildTargetMetadata({ targetTitle: targetOptions }) : buildTargetMetadata(targetOptions);
+  const resultRows = page.locator("#gridTable table.result-table-list tbody tr, table.result-table-list tbody tr, .result-table-list tbody tr");
+  const rowCount = await resultRows.count();
+  if (!rowCount) {
+    throw new Error("No CNKI result rows were found on proxy search results page.");
   }
-  const normalizedTarget = normalizeText(targetTitle);
-  let bestIndex = -1;
-  let bestScore = -1;
-  const candidates = [];
 
-  for (let index = 0; index < linkCount; index += 1) {
-    const titleLocator = titleLinks.nth(index);
-    const titleText = (await titleLocator.innerText().catch(() => "")).trim();
-    const normalizedTitle = normalizeText(titleText);
-    let score = 0;
-    if (normalizedTarget && normalizedTitle === normalizedTarget) score = 100;
-    else if (normalizedTarget && normalizedTitle.includes(normalizedTarget)) score = 90;
-    else if (normalizedTarget && normalizedTarget.includes(normalizedTitle)) score = 80;
-    else if (!normalizedTarget && index === 0) score = 50;
+  let bestCandidate = null;
+  const candidateSummaries = [];
 
-    candidates.push({ index, titleText, score });
-    if (score > bestScore) {
-      bestScore = score;
-      bestIndex = index;
+  for (let index = 0; index < rowCount; index += 1) {
+    const rowLocator = resultRows.nth(index);
+    const candidate = await extractResultCandidate(rowLocator, index);
+    if (!candidate) {
+      continue;
+    }
+
+    const { score, reasons } = scoreResultCandidate(candidate, target);
+    candidate.score = score;
+    candidate.reasons = reasons;
+    candidateSummaries.push({
+      index,
+      titleText: candidate.titleText,
+      score,
+      fileName: candidate.fileName,
+      dbCode: candidate.dbCode,
+      publishYear: candidate.publishYear,
+      reasons
+    });
+
+    if (!bestCandidate || score > bestCandidate.score) {
+      bestCandidate = candidate;
     }
   }
 
-  if (bestIndex < 0) {
-    bestIndex = 0;
+  if (!bestCandidate) {
+    throw new Error("No clickable CNKI result candidates were found on proxy search results page.");
   }
-  const selectedTitleLocator = titleLinks.nth(bestIndex);
-  const selectedTitle = (await selectedTitleLocator.innerText().catch(() => "")).trim();
-  const tableRow = selectedTitleLocator.locator("xpath=ancestor::tr[1]");
-  const hasTableRow = (await tableRow.count().catch(() => 0)) > 0;
+
+  const hasStructuredTarget =
+    Boolean(target.normalizedTitle) ||
+    Boolean(target.fileName) ||
+    Boolean(target.paperId) ||
+    Boolean(target.authorTerms.length) ||
+    Boolean(target.normalizedJournal);
+  const minAcceptableScore = hasStructuredTarget ? 20 : 0;
+  if (bestCandidate.score < minAcceptableScore) {
+    throw new Error(
+      `No confident proxy result match was found for "${target.title || target.pageUrl || "target"}" (best="${bestCandidate.titleText || "(empty title)"}", score=${bestCandidate.score}).`
+    );
+  }
 
   console.log(
-    `[result] selected row ${bestIndex + 1}: ${selectedTitle || "(empty title)"}; candidates=${JSON.stringify(
-      candidates.slice(0, 5)
-    )}`
+    `[result] selected row ${bestCandidate.index + 1}: ${bestCandidate.titleText || "(empty title)"}; score=${bestCandidate.score}; reasons=${bestCandidate.reasons.join(
+      "|"
+    )}; candidates=${JSON.stringify(candidateSummaries.slice(0, 5))}`
   );
 
   return {
-    container: hasTableRow ? tableRow : selectedTitleLocator,
-    titleLocator: selectedTitleLocator,
-    selectedTitle
+    container: bestCandidate.rowLocator,
+    titleLocator: bestCandidate.titleLocator,
+    selectedTitle: bestCandidate.titleText,
+    selectedMeta: bestCandidate
   };
 }
 
@@ -847,6 +1102,13 @@ async function closeLegacySixueSession(session) {
 async function downloadOneFromLegacySixueSession(session, options = {}) {
   const query = options.query || getEnv("LEGACY_QUERY") || getEnv("PAPER_TITLE");
   const targetTitle = options.targetTitle || getEnv("LEGACY_TITLE") || query;
+  const targetAuthors = options.targetAuthors || getEnv("LEGACY_AUTHORS");
+  const targetJournal = options.targetJournal || getEnv("LEGACY_JOURNAL");
+  const targetYear = options.targetYear || getEnv("LEGACY_YEAR");
+  const targetPaperId = options.targetPaperId || getEnv("LEGACY_PAPER_ID");
+  const targetDbCode = options.targetDbCode || getEnv("LEGACY_DB_CODE");
+  const targetFileName = options.targetFileName || getEnv("LEGACY_FILE_NAME");
+  const targetPageUrl = options.targetPageUrl || getEnv("LEGACY_PAGE_URL");
   const downloadDir = path.resolve(options.downloadDir || getEnv("DOWNLOAD_DIR", "./downloads"));
   const pollIntervalMs = options.pollIntervalMs || getNumEnv("POLL_INTERVAL_MS", 2000);
   const downloadSoftTimeoutMs = options.downloadSoftTimeoutMs || getNumEnv("DOWNLOAD_SOFT_TIMEOUT_MS", 600000);
@@ -865,15 +1127,29 @@ async function downloadOneFromLegacySixueSession(session, options = {}) {
     targetTitle,
     downloadPath: "",
     proxySearchUrl: session.searchPage.url(),
-    selectedTitle: ""
+    selectedTitle: "",
+    matchedDbCode: "",
+    matchedFileName: ""
   };
 
   await runProxySearch(session.searchPage, query);
   const artifactDir = path.join(process.cwd(), "outputs", "legacy-sixue-download");
   await savePageArtifacts(session.searchPage, artifactDir, "proxy-cnki-results");
 
-  const selectedMatch = await pickBestResult(session.searchPage, targetTitle);
+  const selectedMatch = await pickBestResult(session.searchPage, {
+    query,
+    targetTitle,
+    targetAuthors,
+    targetJournal,
+    targetYear,
+    targetPaperId,
+    targetDbCode,
+    targetFileName,
+    targetPageUrl
+  });
   result.selectedTitle = selectedMatch.selectedTitle;
+  result.matchedDbCode = selectedMatch.selectedMeta?.dbCode || "";
+  result.matchedFileName = selectedMatch.selectedMeta?.fileName || "";
 
   const downloadPage = await openDownloadTarget(session.context, session.searchPage, selectedMatch);
   await savePageArtifacts(downloadPage, artifactDir, "legacy-download-target");
@@ -1033,5 +1309,11 @@ module.exports = {
   closeLegacySixueSession,
   downloadOneFromLegacySixueSession,
   runLegacySixueDownload,
-  classifyAuthPauseReason
+  classifyAuthPauseReason,
+  __internal: {
+    pickBestResult,
+    buildTargetMetadata,
+    parseProxyHrefMetadata,
+    scoreResultCandidate
+  }
 };
