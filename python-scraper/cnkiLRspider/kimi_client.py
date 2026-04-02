@@ -119,6 +119,16 @@ class OpenAICompatibleJsonClient:
       os.path.join(os.path.dirname(os.path.abspath(__file__)), "outputs", "_llm_debug"),
     )
 
+  def _stream_preview(self, text: str, limit: int = 120) -> str:
+    compact = re.sub(r"\s+", " ", str(text or "")).strip()
+    if len(compact) <= limit:
+      return compact
+    return compact[-limit:]
+
+  def _log_stream_event(self, request_label: str, message: str) -> None:
+    label = request_label or self.name
+    print(f"[{self.name} stream][{label}] {message}", flush=True)
+
   def build_payload(self, system_prompt: str, user_prompt: str) -> Dict[str, object]:
     return {
       "model": self.model,
@@ -132,9 +142,9 @@ class OpenAICompatibleJsonClient:
       "response_format": {"type": "json_object"},
     }
 
-  def _post_json(self, payload: Dict[str, object]) -> Dict[str, object]:
+  def _post_json(self, payload: Dict[str, object], request_label: str = "") -> Dict[str, object]:
     if payload.get("stream"):
-      return self._stream_json(payload)
+      return self._stream_json(payload, request_label=request_label)
 
     request = urllib.request.Request(
       url=self.api_url,
@@ -149,7 +159,7 @@ class OpenAICompatibleJsonClient:
     with urllib.request.urlopen(request, timeout=self.timeout_seconds) as response:
       return json.loads(response.read().decode("utf-8"))
 
-  def _stream_json(self, payload: Dict[str, object]) -> Dict[str, object]:
+  def _stream_json(self, payload: Dict[str, object], request_label: str = "") -> Dict[str, object]:
     request = urllib.request.Request(
       url=self.api_url,
       data=json.dumps(payload).encode("utf-8"),
@@ -164,6 +174,17 @@ class OpenAICompatibleJsonClient:
     full_reasoning = []
     system_fingerprint = ""
     finish_reason = "stop"
+    started_at = time.time()
+    last_report_at = started_at
+    last_reported_chars = 0
+    report_every_seconds = float(os.getenv("LLM_STREAM_LOG_INTERVAL_SECONDS", "1.0"))
+    report_every_chars = int(os.getenv("LLM_STREAM_LOG_INTERVAL_CHARS", "160"))
+    saw_any_delta = False
+
+    self._log_stream_event(
+      request_label,
+      f"started model={payload.get('model', self.model)} stream=true",
+    )
 
     with urllib.request.urlopen(request, timeout=self.timeout_seconds) as response:
       for line in response:
@@ -182,14 +203,50 @@ class OpenAICompatibleJsonClient:
             delta = choices[0].get("delta", {})
             if "content" in delta and delta["content"]:
               full_content.append(delta["content"])
+              saw_any_delta = True
             if "reasoning_content" in delta and delta["reasoning_content"]:
               full_reasoning.append(delta["reasoning_content"])
+              saw_any_delta = True
             if choices[0].get("finish_reason"):
               finish_reason = choices[0]["finish_reason"]
         except json.JSONDecodeError:
           continue
 
+        total_chars = sum(len(part) for part in full_content) + sum(len(part) for part in full_reasoning)
+        now = time.time()
+        should_report = False
+        if saw_any_delta and last_reported_chars == 0:
+          should_report = True
+        elif total_chars - last_reported_chars >= report_every_chars:
+          should_report = True
+        elif now - last_report_at >= report_every_seconds and total_chars > last_reported_chars:
+          should_report = True
+
+        if should_report:
+          content_preview = self._stream_preview("".join(full_content))
+          reasoning_preview = self._stream_preview("".join(full_reasoning))
+          parts = [
+            f"content_chars={sum(len(part) for part in full_content)}",
+            f"reasoning_chars={sum(len(part) for part in full_reasoning)}",
+          ]
+          if content_preview:
+            parts.append(f"content_tail={content_preview}")
+          elif reasoning_preview:
+            parts.append(f"reasoning_tail={reasoning_preview}")
+          self._log_stream_event(request_label, " | ".join(parts))
+          last_report_at = now
+          last_reported_chars = total_chars
+
     # Synthesize a response that matches the non-stream format
+    self._log_stream_event(
+      request_label,
+      (
+        f"completed finish_reason={finish_reason} "
+        f"content_chars={sum(len(part) for part in full_content)} "
+        f"reasoning_chars={sum(len(part) for part in full_reasoning)} "
+        f"elapsed={time.time() - started_at:.1f}s"
+      ),
+    )
     return {
       "choices": [
         {
@@ -211,7 +268,13 @@ class OpenAICompatibleJsonClient:
     with open(path, "w", encoding="utf-8") as handle:
       json.dump(result, handle, ensure_ascii=False, indent=2)
 
-  def call_json(self, system_prompt: str, user_prompt: str, pause_after_seconds: float = 0.0) -> Dict[str, object]:
+  def call_json(
+    self,
+    system_prompt: str,
+    user_prompt: str,
+    pause_after_seconds: float = 0.0,
+    request_label: str = "",
+  ) -> Dict[str, object]:
     payload = self.build_payload(system_prompt, user_prompt)
 
     last_error: Exception | None = None
@@ -219,7 +282,7 @@ class OpenAICompatibleJsonClient:
     for delay in self.retry_delays:
       result = None
       try:
-        result = self._post_json(payload)
+        result = self._post_json(payload, request_label=request_label)
         self._write_debug_response(result)
         parsed = _extract_json_from_message(result["choices"][0]["message"])
         if pause_after_seconds > 0:
@@ -229,10 +292,15 @@ class OpenAICompatibleJsonClient:
         last_error = exc
         # If 4xx, likely streaming or JSON mode not supported by this specific model/endpoint
         if 400 <= exc.code < 500 and payload.get("stream"):
+          self._log_stream_event(
+            request_label,
+            f"stream rejected by endpoint with HTTP {exc.code}, retrying with stream=false",
+          )
           payload["stream"] = False
         time.sleep(delay)
       except Exception as exc:
         last_error = exc
+        self._log_stream_event(request_label, f"request attempt failed: {exc}")
         finish_reason = ""
         try:
           if isinstance(result, dict) and "choices" in result:
@@ -511,6 +579,7 @@ class ExpertDiscussionEngine:
         critique_system,
         critique_user,
         pause_after_seconds=self.meeting_pause_seconds,
+        request_label=f"{kind}:silicon_critique",
       )
       transcript["deepseek_critique"] = silicon_critique
     except Exception as exc:
@@ -538,6 +607,7 @@ class ExpertDiscussionEngine:
         revision_system,
         revision_user,
         pause_after_seconds=self.meeting_pause_seconds,
+        request_label=f"{kind}:kimi_revision",
       )
       transcript["kimi_final"] = kimi_final
       transcript["consensus_source"] = "kimi_revision"
@@ -560,7 +630,12 @@ class ExpertDiscussionEngine:
 
   def discuss_round1(self, topic: str) -> Dict[str, object]:
     system_prompt, user_prompt = build_round1_strategy_prompts(topic)
-    kimi_initial = self.kimi.call_json(system_prompt, user_prompt, pause_after_seconds=self.meeting_pause_seconds)
+    kimi_initial = self.kimi.call_json(
+      system_prompt,
+      user_prompt,
+      pause_after_seconds=self.meeting_pause_seconds,
+      request_label="round1:kimi_initial",
+    )
     return self._run_discussion_round(
       round_no=1,
       kind="round1_strategy",
@@ -570,7 +645,12 @@ class ExpertDiscussionEngine:
 
   def discuss_round2(self, topic: str, strategy_round1: Dict[str, object], map_batches: List[Dict[str, object]]) -> Dict[str, object]:
     system_prompt, user_prompt = build_reduce_prompts(topic, strategy_round1, map_batches)
-    kimi_initial = self.kimi.call_json(system_prompt, user_prompt, pause_after_seconds=self.meeting_pause_seconds)
+    kimi_initial = self.kimi.call_json(
+      system_prompt,
+      user_prompt,
+      pause_after_seconds=self.meeting_pause_seconds,
+      request_label="round2:kimi_initial",
+    )
     return self._run_discussion_round(
       round_no=2,
       kind="round2_strategy",

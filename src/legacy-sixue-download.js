@@ -915,23 +915,98 @@ async function ensureFieldModeTka(page) {
     .catch(() => {});
 }
 
-async function runProxySearch(page, query) {
-  await ensureFieldModeTka(page);
+async function setProxySearchQuery(page, query) {
   const searchInput = page.locator("#txt_search").first();
   await humanPause(page, "before-fill-query", 1000, 2000);
-  await searchInput.fill("");
-  await searchInput.fill(query);
+  await searchInput.click({ force: true }).catch(() => {});
+  await searchInput.press("Control+A").catch(() => {});
+  await searchInput.press("Delete").catch(() => {});
+  await searchInput.fill("").catch(() => {});
+  await searchInput.type(query, { delay: randomInt(70, 140) }).catch(() => {});
+  await page
+    .evaluate((value) => {
+      const input = document.querySelector("#txt_search");
+      if (!input) return false;
+      input.value = value;
+      input.setAttribute("value", value);
+      input.setAttribute("searchword", value);
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+      input.dispatchEvent(new Event("change", { bubbles: true }));
+      input.dispatchEvent(new KeyboardEvent("keyup", { bubbles: true, key: "Process" }));
+      return true;
+    }, query)
+    .catch(() => false);
   await humanPause(page, "after-fill-query", 800, 1800);
-  await humanClick(page, page.locator(".search-btn").first(), "cnki-search-button");
-  await page.waitForURL(/\/kns8s\/search/, { timeout: 120000 }).catch(() => {});
-  try {
-    await page.waitForSelector("table.result-table-list, .result-table-list", { timeout: 120000 });
-  } catch (error) {
-    const artifactDir = path.join(process.cwd(), "outputs", "legacy-sixue-download");
-    await savePageArtifacts(page, artifactDir, "proxy-cnki-results-timeout").catch(() => {});
-    throw error;
+}
+
+async function proxySearchRequestLooksValid(page, query) {
+  const normalizedQuery = normalizeText(query);
+  if (!normalizedQuery) {
+    return true;
   }
-  await observeAfterNavigation(page, "proxy-cnki-results");
+
+  const state = await page
+    .evaluate(() => {
+      const input = document.querySelector("#txt_search");
+      const briefRequest = document.querySelector("#briefRequest");
+      return {
+        inputValue: input ? input.value || "" : "",
+        inputAttrValue: input ? input.getAttribute("value") || "" : "",
+        searchword: input ? input.getAttribute("searchword") || "" : "",
+        briefRequest:
+          (briefRequest && ("value" in briefRequest ? briefRequest.value : briefRequest.getAttribute("value"))) || ""
+      };
+    })
+    .catch(() => ({ inputValue: "", inputAttrValue: "", searchword: "", briefRequest: "" }));
+
+  const queryEchoes = [state.inputValue, state.inputAttrValue, state.searchword, state.briefRequest]
+    .map((value) => normalizeText(value))
+    .filter(Boolean);
+
+  if (queryEchoes.some((value) => value.includes(normalizedQuery) || normalizedQuery.includes(value))) {
+    return true;
+  }
+
+  if (/\?{4,}/.test(String(state.briefRequest || ""))) {
+    return false;
+  }
+
+  const bodyText = await page.locator("body").innerText().catch(() => "");
+  return normalizeText(bodyText).includes(normalizedQuery);
+}
+
+async function runProxySearch(page, query) {
+  await ensureFieldModeTka(page);
+  let lastError = null;
+
+  for (let attempt = 1; attempt <= 2; attempt += 1) {
+    try {
+      await setProxySearchQuery(page, query);
+      await humanClick(page, page.locator(".search-btn").first(), "cnki-search-button");
+      await page.waitForURL(/\/kns8s\/search/, { timeout: 120000 }).catch(() => {});
+      await page.waitForSelector("table.result-table-list, .result-table-list", { timeout: 120000 });
+
+      const requestLooksValid = await proxySearchRequestLooksValid(page, query);
+      if (!requestLooksValid) {
+        const artifactDir = path.join(process.cwd(), "outputs", "legacy-sixue-download");
+        await savePageArtifacts(page, artifactDir, `proxy-cnki-results-invalid-query-attempt${attempt}`).catch(() => {});
+        throw new Error(`Proxy CNKI search did not preserve the query text for "${query}".`);
+      }
+
+      await observeAfterNavigation(page, "proxy-cnki-results");
+      return;
+    } catch (error) {
+      lastError = error;
+      if (attempt >= 2) {
+        break;
+      }
+      await humanPause(page, `proxy-search-retry-${attempt}`, 1200, 2200).catch(() => {});
+    }
+  }
+
+  const artifactDir = path.join(process.cwd(), "outputs", "legacy-sixue-download");
+  await savePageArtifacts(page, artifactDir, "proxy-cnki-results-timeout").catch(() => {});
+  throw lastError || new Error(`Proxy CNKI search failed for "${query}".`);
 }
 
 async function pickBestResult(page, targetOptions = {}) {
@@ -980,7 +1055,17 @@ async function pickBestResult(page, targetOptions = {}) {
     Boolean(target.paperId) ||
     Boolean(target.authorTerms.length) ||
     Boolean(target.normalizedJournal);
-  const minAcceptableScore = hasStructuredTarget ? 20 : 0;
+  const hasTitleMatch = bestCandidate.reasons.some((reason) =>
+    ["exact-title", "title-contains-target", "target-contains-title"].includes(reason)
+  );
+  const hasStrongIdentityMatch = bestCandidate.reasons.some((reason) => ["file-name", "paper-id"].includes(reason));
+  if (target.normalizedTitle && !hasTitleMatch && !hasStrongIdentityMatch) {
+    throw new Error(
+      `No proxy result title matched "${target.title || "target"}" (best="${bestCandidate.titleText || "(empty title)"}", score=${bestCandidate.score}).`
+    );
+  }
+
+  const minAcceptableScore = hasStructuredTarget ? (target.normalizedTitle ? 60 : 20) : 0;
   if (bestCandidate.score < minAcceptableScore) {
     throw new Error(
       `No confident proxy result match was found for "${target.title || target.pageUrl || "target"}" (best="${bestCandidate.titleText || "(empty title)"}", score=${bestCandidate.score}).`

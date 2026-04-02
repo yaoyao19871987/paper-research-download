@@ -90,6 +90,13 @@ def _load_kimi_token() -> str:
     return token
 
 
+def _env_bool(name: str, default: bool) -> bool:
+    value = str(os.getenv(name, "") or "").strip().lower()
+    if not value:
+        return default
+    return value in {"1", "true", "yes", "on"}
+
+
 def _image_to_data_url(image_path: str) -> str:
     mime_type = mimetypes.guess_type(image_path)[0] or "image/png"
     with open(image_path, "rb") as handle:
@@ -98,7 +105,14 @@ def _image_to_data_url(image_path: str) -> str:
     return f"data:{mime_type};base64,{encoded}"
 
 
+def _log_stream_event(message: str) -> None:
+    print(f"[Kimi stream][captcha_ocr] {message}", flush=True)
+
+
 def _post_json(api_url: str, token: str, payload: Dict[str, object], timeout_seconds: int) -> Dict[str, object]:
+    if payload.get("stream"):
+        return _stream_json(api_url, token, payload, timeout_seconds)
+
     request = urllib.request.Request(
         url=api_url,
         data=json.dumps(payload).encode("utf-8"),
@@ -112,6 +126,89 @@ def _post_json(api_url: str, token: str, payload: Dict[str, object], timeout_sec
     )
     with urllib.request.urlopen(request, timeout=timeout_seconds) as response:
         return json.loads(response.read().decode("utf-8"))
+
+
+def _stream_json(api_url: str, token: str, payload: Dict[str, object], timeout_seconds: int) -> Dict[str, object]:
+    request = urllib.request.Request(
+        url=api_url,
+        data=json.dumps(payload).encode("utf-8"),
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json",
+            "User-Agent": os.getenv("KIMI_USER_AGENT", "claude-code/1.0"),
+            "X-Client-Name": os.getenv("KIMI_CLIENT_NAME", "claude-code"),
+        },
+        method="POST",
+    )
+    full_content: List[str] = []
+    full_reasoning: List[str] = []
+    finish_reason = "stop"
+    started_at = time.time()
+    last_report_at = started_at
+    last_reported_chars = 0
+    report_every_seconds = float(os.getenv("LLM_STREAM_LOG_INTERVAL_SECONDS", "1.0"))
+    report_every_chars = int(os.getenv("LLM_STREAM_LOG_INTERVAL_CHARS", "160"))
+
+    _log_stream_event(f"started model={payload.get('model', '')} stream=true")
+    with urllib.request.urlopen(request, timeout=timeout_seconds) as response:
+        for line in response:
+            line_str = line.decode("utf-8").strip()
+            if not line_str.startswith("data:"):
+                continue
+            data_body = line_str[len("data:"):].strip()
+            if data_body == "[DONE]":
+                break
+            try:
+                chunk = json.loads(data_body)
+            except json.JSONDecodeError:
+                continue
+
+            choices = chunk.get("choices", [])
+            if not choices:
+                continue
+            delta = choices[0].get("delta", {})
+            if "content" in delta and delta["content"]:
+                full_content.append(delta["content"])
+            if "reasoning_content" in delta and delta["reasoning_content"]:
+                full_reasoning.append(delta["reasoning_content"])
+            if choices[0].get("finish_reason"):
+                finish_reason = choices[0]["finish_reason"]
+
+            total_chars = sum(len(part) for part in full_content) + sum(len(part) for part in full_reasoning)
+            now = time.time()
+            if total_chars and (
+                last_reported_chars == 0
+                or total_chars - last_reported_chars >= report_every_chars
+                or now - last_report_at >= report_every_seconds
+            ):
+                preview_source = "".join(full_content) or "".join(full_reasoning)
+                preview = re.sub(r"\s+", " ", preview_source).strip()[-120:]
+                _log_stream_event(
+                    f"content_chars={sum(len(part) for part in full_content)} "
+                    f"reasoning_chars={sum(len(part) for part in full_reasoning)} "
+                    f"tail={preview}"
+                )
+                last_report_at = now
+                last_reported_chars = total_chars
+
+    _log_stream_event(
+        f"completed finish_reason={finish_reason} "
+        f"content_chars={sum(len(part) for part in full_content)} "
+        f"reasoning_chars={sum(len(part) for part in full_reasoning)} "
+        f"elapsed={time.time() - started_at:.1f}s"
+    )
+    return {
+        "choices": [
+            {
+                "message": {
+                    "role": "assistant",
+                    "content": "".join(full_content),
+                    "reasoning_content": "".join(full_reasoning),
+                },
+                "finish_reason": finish_reason,
+            }
+        ]
+    }
 
 
 def _extract_message_text(result: Dict[str, object]) -> str:
@@ -178,7 +275,7 @@ def solve_captcha(image_path: str) -> Dict[str, str]:
         ],
         "temperature": 0,
         "max_tokens": int(os.getenv("KIMI_VISION_MAX_TOKENS", "1200")),
-        "stream": False,
+        "stream": _env_bool("KIMI_VISION_STREAM", True),
     }
 
     retry_delays = [2, 4, 8]

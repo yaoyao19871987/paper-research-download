@@ -332,7 +332,12 @@ def main() -> None:
   system_prompt, user_prompt = build_prompts(context)
   try:
     provider_name, client = pick_provider(args.provider)
-    result = client.call_json(system_prompt, user_prompt, pause_after_seconds=1.0)
+    result = client.call_json(
+      system_prompt,
+      user_prompt,
+      pause_after_seconds=1.0,
+      request_label=f"work_summary:{os.path.basename(run_dir)}",
+    )
     report_title = str(result.get("report_title") or report_title).strip()
     markdown = str(result.get("markdown") or "").strip()
     if not markdown:

@@ -2,6 +2,17 @@
 
 这个目录只负责“选题研究、CNKI 检索、候选整理、导出下载队列”，不负责最终通过思学代理页落地下载文件。
 
+如果你要跑完整端到端流程，优先从仓库根目录使用独立控制台：
+
+```powershell
+cd D:\Code\paper-download
+npm run console
+```
+
+然后打开：
+
+`http://127.0.0.1:8787`
+
 当前主入口是：
 
 - `research_pipeline.py`

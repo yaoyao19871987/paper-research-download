@@ -104,6 +104,46 @@ async function hasCaptcha(page, selectorGroup = {}) {
   return Boolean(input && image);
 }
 
+function extractCaptchaFromOcrOutput(rawOutput) {
+  const text = String(rawOutput || "").trim();
+  if (!text) {
+    throw new Error("Captcha OCR returned empty output.");
+  }
+
+  const lines = text
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+
+  for (let index = lines.length - 1; index >= 0; index -= 1) {
+    try {
+      const parsed = JSON.parse(lines[index]);
+      const captcha = String(parsed.captcha || "")
+        .replace(/\s+/g, "")
+        .replace(/[^0-9A-Za-z]/g, "")
+        .trim();
+      if (captcha) {
+        return captcha;
+      }
+    } catch {
+      // Keep scanning earlier lines for the final JSON payload.
+    }
+  }
+
+  const match = text.match(/\{[\s\S]*"captcha"\s*:\s*"([^"]+)"[\s\S]*\}/);
+  if (match) {
+    const captcha = String(match[1] || "")
+      .replace(/\s+/g, "")
+      .replace(/[^0-9A-Za-z]/g, "")
+      .trim();
+    if (captcha) {
+      return captcha;
+    }
+  }
+
+  throw new Error(`Captcha OCR returned invalid JSON: ${text}`);
+}
+
 function callKimiOcr(imagePath, label) {
   return new Promise((resolve, reject) => {
     const child = spawn("python", [OCR_SCRIPT, imagePath], {
@@ -137,11 +177,7 @@ function callKimiOcr(imagePath, label) {
         return;
       }
       try {
-        const parsed = JSON.parse(stdout.trim());
-        const captcha = String(parsed.captcha || "")
-          .replace(/\s+/g, "")
-          .replace(/[^0-9A-Za-z]/g, "")
-          .trim();
+        const captcha = extractCaptchaFromOcrOutput(stdout);
         if (!captcha) {
           reject(new Error(`Captcha OCR returned empty text for ${label || "captcha"}.`));
           return;

@@ -168,6 +168,12 @@ class ResearchPipeline:
     self.max_pages_per_view = self._env_int("CNKI_MAX_PAGES_PER_VIEW", 2)
     self.batch_size = self._env_int("CNKI_MAP_BATCH_SIZE", 12)
     self.download_candidate_count = self._env_int("CNKI_DOWNLOAD_CANDIDATES", 15)
+    self.early_stop_enabled = self._env_flag("CNKI_EARLY_STOP_ENABLED", True)
+    self.early_stop_min_selected = self._env_int(
+      "CNKI_EARLY_STOP_MIN_SELECTED",
+      max(self.download_candidate_count * 3, 30),
+    )
+    self.skip_round2_crawl_when_enough = self._env_flag("CNKI_SKIP_ROUND2_CRAWL_WHEN_ENOUGH", True)
     self.sort_views = ["default", "cited", "download"]
     self.approve_strategy = approve_strategy
     self.approve_selection = approve_selection
@@ -193,6 +199,12 @@ class ResearchPipeline:
       return int(value)
     except ValueError:
       return default
+
+  def _env_flag(self, name: str, default: bool) -> bool:
+    value = os.getenv(name)
+    if value is None:
+      return default
+    return str(value).strip().lower() in {"1", "true", "yes", "on"}
 
   def _load_resume_state(self) -> None:
     if os.path.exists(self.master_raw_path):
@@ -394,6 +406,19 @@ class ResearchPipeline:
       handle.write("\n".join(lines))
     return candidates
 
+  def _selected_candidate_rows(self) -> List[Dict[str, str]]:
+    return [
+      row for row in self.records.values()
+      if row.get("is_worth_keeping", "").lower() == "true"
+      and row.get("label", "") != "teaching"
+    ]
+
+  def _selected_candidate_count(self) -> int:
+    return len(self._selected_candidate_rows())
+
+  def _should_early_stop_after_round1(self) -> bool:
+    return self.early_stop_enabled and self._selected_candidate_count() >= self.early_stop_min_selected
+
   def _load_user_selected_candidates(self) -> List[Dict[str, str]]:
     if not os.path.exists(self.download_candidates_path):
       return []
@@ -584,7 +609,8 @@ class ResearchPipeline:
 
     self._write_status("kimi_map_batch", waiting_for_kimi=True, batch_size=len(batch_rows))
     system_prompt, user_prompt = build_batch_map_prompts(self.topic, batch_rows)
-    result = self.kimi.call_json(system_prompt, user_prompt)
+    batch_label = f"batch_map:{batch_ids[0]}..{batch_ids[-1]}" if batch_ids else "batch_map"
+    result = self.kimi.call_json(system_prompt, user_prompt, request_label=batch_label)
     papers = result.get("papers", [])
     if not isinstance(papers, list):
       raise RuntimeError("Kimi batch map response is missing the papers list.")
@@ -761,10 +787,12 @@ class ResearchPipeline:
 
       self._mark_crawl_completed(crawl_key)
 
-  def _crawl_queries(self, query_specs: List[Dict[str, object]], round_no: int) -> None:
+  def _crawl_queries(self, query_specs: List[Dict[str, object]], round_no: int) -> bool:
     driver = build_driver()
+    stopped_early = False
     try:
       for query_index, query_spec in enumerate(query_specs):
+        query_name = str(query_spec.get("name", f"round{round_no}_query"))
         last_error: Exception | None = None
         for attempt in range(3):
           try:
@@ -804,10 +832,28 @@ class ResearchPipeline:
               except Exception:
                 pass
               driver = build_driver()
-            else:
+          else:
               print(f"Page interaction failed ({type(wde).__name__}): {wde}. Retrying query in same browser ({attempt + 2}/3)...")
         if last_error is not None:
           raise last_error
+
+        self._flush_remaining_batches()
+        if round_no == 1 and self._should_early_stop_after_round1():
+          selected_count = self._selected_candidate_count()
+          print(
+            f"Early stopping remaining round 1 queries after '{query_name}' "
+            f"because {selected_count} selected papers already exceed the threshold "
+            f"{self.early_stop_min_selected}."
+          )
+          self._write_status(
+            "search_early_stop",
+            waiting_for_kimi=False,
+            last_checkpoint=f"round{round_no}:{query_name}:early_stop",
+            selected_candidate_count=selected_count,
+            early_stop_threshold=self.early_stop_min_selected,
+          )
+          stopped_early = True
+          break
     except TimeoutException:
       waiting = detect_waiting_state(driver)
       dump_debug_html(driver, self.debug_html_path)
@@ -820,6 +866,7 @@ class ResearchPipeline:
       raise
     finally:
       driver.quit()
+    return stopped_early
 
   def _build_round1_queries(self, strategy: Dict[str, object]) -> List[Dict[str, object]]:
     queries: List[Dict[str, object]] = []
@@ -894,7 +941,6 @@ class ResearchPipeline:
       round1_queries = self._build_round1_queries(strategy_round1)
       if round1_queries:
         self._crawl_queries(round1_queries, round_no=1)
-        self._flush_remaining_batches()
 
       if os.path.exists(self.strategy2_path) and os.path.exists(self.discussion2_path):
         strategy_round2 = load_snapshot_json(self.strategy2_path)
@@ -905,9 +951,23 @@ class ResearchPipeline:
         strategy_round2 = self._reduce_round2_strategy(strategy_round1)
       round2_queries = self._build_round2_queries(strategy_round2)
       if round2_queries:
-        self._crawl_queries(round2_queries, round_no=2)
-        self._flush_remaining_batches()
+        if self.skip_round2_crawl_when_enough and self._should_early_stop_after_round1():
+          selected_count = self._selected_candidate_count()
+          print(
+            f"Skipping round 2 crawl because {selected_count} selected papers already exceed "
+            f"the threshold {self.early_stop_min_selected}."
+          )
+          self._write_status(
+            "round2_crawl_skipped",
+            waiting_for_kimi=False,
+            last_checkpoint="round2_crawl_skipped",
+            selected_candidate_count=selected_count,
+            early_stop_threshold=self.early_stop_min_selected,
+          )
+        else:
+          self._crawl_queries(round2_queries, round_no=2)
 
+      self._flush_remaining_batches()
       self._dump_master_files()
       candidates = self._write_candidate_review()
 

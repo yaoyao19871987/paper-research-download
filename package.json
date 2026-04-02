@@ -2,7 +2,16 @@
   "name": "paper-download",
   "version": "1.0.0",
   "description": "CNKI topic research pipeline and Sixue legacy download automation",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/yaoyao19871987/paper-research-download.git"
+  },
+  "bugs": {
+    "url": "https://github.com/yaoyao19871987/paper-research-download/issues"
+  },
+  "homepage": "https://github.com/yaoyao19871987/paper-research-download#readme",
   "scripts": {
+    "console": "node src/console-server.js",
     "legacy-download": "node src/legacy-sixue-download.js",
     "pipeline": "node src/pipeline-runner.js",
     "pipeline:dev": "set PAPER_ENV=dev&& node src/pipeline-runner.js",
@@ -10,9 +19,12 @@
     "pipeline:prod": "set PAPER_ENV=prod&& node src/pipeline-runner.js"
   },
   "keywords": [
+    "cnki",
+    "paper",
     "playwright",
     "automation",
-    "download"
+    "download",
+    "research"
   ],
   "author": "",
   "license": "MIT",

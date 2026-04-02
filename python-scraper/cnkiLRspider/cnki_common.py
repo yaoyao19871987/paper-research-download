@@ -238,8 +238,33 @@ def _advanced_search_ready(driver: webdriver.Edge) -> bool:
 def _safe_click(driver: webdriver.Edge, element: WebElement) -> None:
   try:
     element.click()
-  except (ElementClickInterceptedException, StaleElementReferenceException):
+  except ElementClickInterceptedException:
     driver.execute_script("arguments[0].click();", element)
+
+
+def _click_locators(
+  driver: webdriver.Edge,
+  locators: Sequence[Locator],
+  timeout_seconds: int = 8,
+  retries: int = 3,
+  settle_pause: str = "micro",
+) -> bool:
+  for attempt in range(retries):
+    element = _clickable(driver, locators, timeout_seconds=timeout_seconds)
+    if element is None:
+      return False
+
+    try:
+      _safe_click(driver, element)
+      if settle_pause:
+        human_pause(settle_pause)
+      return True
+    except StaleElementReferenceException:
+      if attempt >= retries - 1:
+        raise
+      human_sleep(0.2, 0.5)
+
+  return False
 
 
 def wait_for_verification_to_clear(driver: webdriver.Edge, timeout_seconds: int = 600) -> None:
@@ -439,20 +464,21 @@ def fill_advanced_conditions(driver: webdriver.Edge, conditions: Sequence[Dict[s
 
 
 def submit_search(driver: webdriver.Edge) -> None:
-  search_button = _clickable(
-    driver,
-    [
-      (By.CSS_SELECTOR, "input.btn-search"),
-      (By.CSS_SELECTOR, "button.btn-search"),
-      (By.CSS_SELECTOR, "button[class*='search']"),
-      (By.CSS_SELECTOR, "input[type='button'][value*='检索']"),
-    ],
-    timeout_seconds=6,
-  )
+  search_button_locators = [
+    (By.CSS_SELECTOR, "input.btn-search"),
+    (By.CSS_SELECTOR, "button.btn-search"),
+    (By.CSS_SELECTOR, "button[class*='search']"),
+    (By.CSS_SELECTOR, "input[type='button'][value*='检索']"),
+  ]
+  search_button = _clickable(driver, search_button_locators, timeout_seconds=6)
   if search_button is None:
     raise NoSuchElementException("Could not find CNKI search button.")
 
-  _safe_click(driver, search_button)
+  try:
+    _safe_click(driver, search_button)
+  except StaleElementReferenceException:
+    if not _click_locators(driver, search_button_locators, timeout_seconds=6, retries=3, settle_pause=""):
+      raise NoSuchElementException("Could not find CNKI search button.")
   wait_for_verification_to_clear(driver, timeout_seconds=env_int("CNKI_VERIFY_TIMEOUT", 600))
   _wait_for_results(driver, timeout_seconds=25)
   human_pause("read")
@@ -472,49 +498,54 @@ def _wait_for_results(driver: webdriver.Edge, timeout_seconds: int = 25) -> None
   WebDriverWait(driver, timeout_seconds).until(results_ready)
 
 
+def _page_size_already_selected(driver: webdriver.Edge, page_size: int) -> bool:
+  target = str(page_size)
+  try:
+    return bool(driver.execute_script(
+      """
+      const root = document.querySelector('#perPageDiv');
+      if (!root) return false;
+      const selected = root.querySelector('.sort-default, .active, .cur, [aria-selected="true"]');
+      if (!selected) return false;
+      return (selected.textContent || '').includes(arguments[0]);
+      """,
+      target,
+    ))
+  except Exception:
+    return False
+
+
 def set_page_size(driver: webdriver.Edge, page_size: int = 50) -> bool:
-  trigger = _clickable(
-    driver,
-    [
-      (By.XPATH, "//*[@id='perPageDiv']//i"),
-      (By.XPATH, "//*[@id='perPageDiv']//span"),
-    ],
-    timeout_seconds=4,
-  )
-  if trigger is None:
+  if _page_size_already_selected(driver, page_size):
+    return True
+
+  trigger_locators = [
+    (By.XPATH, "//*[@id='perPageDiv']//i"),
+    (By.XPATH, "//*[@id='perPageDiv']//span"),
+  ]
+  if not _click_locators(driver, trigger_locators, timeout_seconds=4, retries=4):
     return False
 
-  _safe_click(driver, trigger)
-  human_sleep(0.3, 0.6)
-  option = _clickable(
-    driver,
-    [
-      (By.XPATH, f"//*[@id='perPageDiv']//a[normalize-space()='{page_size}']"),
-      (By.XPATH, f"//*[@id='perPageDiv']//li[contains(.,'{page_size}')]//a"),
-    ],
-    timeout_seconds=4,
-  )
-  if option is None:
+  option_locators = [
+    (By.XPATH, f"//*[@id='perPageDiv']//a[normalize-space()='{page_size}']"),
+    (By.XPATH, f"//*[@id='perPageDiv']//li[contains(.,'{page_size}')]//a"),
+  ]
+  if not _click_locators(driver, option_locators, timeout_seconds=4, retries=4, settle_pause=""):
     return False
 
-  _safe_click(driver, option)
+  WebDriverWait(driver, 8).until(lambda d: _page_size_already_selected(d, page_size))
   human_pause("read")
   return True
 
 
 def switch_to_detail_view(driver: webdriver.Edge) -> bool:
-  target = _clickable(
-    driver,
-    [
-      (By.XPATH, "//*[@id='gridTable']//li[contains(.,'璇︽儏')]"),
-      (By.XPATH, "//li[contains(@class,'detail')]"),
-      (By.XPATH, "//i[contains(@class,'icon-detail')]"),
-    ],
-    timeout_seconds=4,
-  )
-  if target is None:
+  detail_view_locators = [
+    (By.XPATH, "//*[@id='gridTable']//li[contains(.,'璇︽儏')]"),
+    (By.XPATH, "//li[contains(@class,'detail')]"),
+    (By.XPATH, "//i[contains(@class,'icon-detail')]"),
+  ]
+  if not _click_locators(driver, detail_view_locators, timeout_seconds=4, retries=3, settle_pause=""):
     return False
-  _safe_click(driver, target)
   human_sleep(0.6, 1.0)
   return True
 

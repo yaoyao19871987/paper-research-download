@@ -34,6 +34,7 @@ const WORK_REPORT_SCRIPT = path.join(SEARCH_DIR, "generate_work_summary_report.p
 const PROJECT_WORK_REPORT_DIR = path.resolve(process.env.WORK_REPORT_DIR || path.join(ROOT_DIR, "work-reports"));
 const PIPELINE_STATE_FILE = "pipeline_state.json";
 const PIPELINE_RESULT_FILE = "pipeline_result.json";
+const LEGACY_RUN_STATUS_FILE = "run_status.json";
 const TOPIC_FILE_NAME = "input_topic.txt";
 const CANDIDATE_FILE_NAME = "papers_for_download.csv";
 const QUEUE_FILE_NAME = "download_queue.csv";
@@ -54,6 +55,17 @@ const PIPELINE_STAGES = {
   WRITE_WORK_REPORT: "WRITE_WORK_REPORT",
   DONE: "DONE",
   FAILED: "FAILED"
+};
+
+const LEGACY_RUN_STAGE_MAP = {
+  [PIPELINE_STAGES.WAIT_USER_CONFIRM]: "awaiting_download_selection",
+  [PIPELINE_STAGES.QUEUE_READY]: "ready_for_download",
+  [PIPELINE_STAGES.DOWNLOADING]: "downloading",
+  [PIPELINE_STAGES.PAUSED_FOR_AUTH]: "paused_for_auth",
+  [PIPELINE_STAGES.VERIFY_DOWNLOADS]: "verifying_downloads",
+  [PIPELINE_STAGES.WRITE_WORK_REPORT]: "writing_work_report",
+  [PIPELINE_STAGES.DONE]: "done",
+  [PIPELINE_STAGES.FAILED]: "failed"
 };
 
 const SEARCH_RETRY_LIMIT = 3;
@@ -107,6 +119,10 @@ function getRunFile(runDir, name) {
 
 function nowIso() {
   return new Date().toISOString();
+}
+
+function nowIsoSeconds() {
+  return new Date().toISOString().replace(/\.\d{3}Z$/, "");
 }
 
 function emitMarker(marker, payload) {
@@ -179,6 +195,80 @@ function savePipelineArtifacts(state) {
     updatedAt: state.updatedAt
   };
   writeJson(getRunFile(state.runDir, PIPELINE_RESULT_FILE), resultPayload);
+  syncLegacyRunStatus(state);
+}
+
+function countDownloadResults(results, status) {
+  return results.filter((item) => item.status === status).length;
+}
+
+function getLegacyRunStage(stage) {
+  return LEGACY_RUN_STAGE_MAP[stage] || "";
+}
+
+function getLegacyLastCheckpoint(state, legacyStage, currentStatus) {
+  if (legacyStage === "ready_for_download") {
+    return path.basename(state.queueCsv || QUEUE_FILE_NAME);
+  }
+  if (legacyStage === "downloading") {
+    return `download_${String(state.currentDownloadIndex || 0).padStart(2, "0")}`;
+  }
+  if (legacyStage === "writing_work_report") {
+    return "pipeline_work_summary.log";
+  }
+  if (legacyStage === "done") {
+    return PIPELINE_RESULT_FILE;
+  }
+  if (legacyStage === "failed") {
+    return currentStatus?.last_checkpoint || "pipeline_failed";
+  }
+  return currentStatus?.last_checkpoint || legacyStage;
+}
+
+function syncLegacyRunStatus(state) {
+  const legacyStage = getLegacyRunStage(state.stage);
+  if (!legacyStage) {
+    return;
+  }
+
+  const statusPath = getRunFile(state.runDir, LEGACY_RUN_STATUS_FILE);
+  const currentStatus = readJson(statusPath, {}) || {};
+  const outputFiles =
+    currentStatus.output_files && typeof currentStatus.output_files === "object"
+      ? { ...currentStatus.output_files }
+      : {};
+
+  outputFiles["download_queue.csv"] = state.queueCsv;
+  outputFiles[PIPELINE_STATE_FILE] = getRunFile(state.runDir, PIPELINE_STATE_FILE);
+  outputFiles[PIPELINE_RESULT_FILE] = getRunFile(state.runDir, PIPELINE_RESULT_FILE);
+
+  if (state.metadata?.workReportPath) {
+    outputFiles["work_summary_report.md"] = state.metadata.workReportPath;
+  }
+  if (state.metadata?.projectWorkReportPath) {
+    outputFiles["project_work_summary_report.md"] = state.metadata.projectWorkReportPath;
+  }
+
+  const nextStatus = {
+    ...currentStatus,
+    topic: state.topic,
+    stage: legacyStage,
+    run_dir: state.runDir,
+    updated_at: nowIsoSeconds(),
+    last_checkpoint: getLegacyLastCheckpoint(state, legacyStage, currentStatus),
+    error: state.lastError || "",
+    waiting_for_verification: false,
+    waiting_for_kimi: legacyStage === "writing_work_report",
+    approval_message: legacyStage === "awaiting_download_selection" ? currentStatus.approval_message || "" : "",
+    selected_count: state.selectedTitles.length,
+    downloaded_count: countDownloadResults(state.downloadResults, "downloaded"),
+    failed_count: countDownloadResults(state.downloadResults, "failed"),
+    current_download_index: state.currentDownloadIndex || 0,
+    current_download_title: state.currentDownloadTitle || "",
+    output_files: outputFiles
+  };
+
+  writeJson(statusPath, nextStatus);
 }
 
 function updateState(state, patch) {
@@ -367,9 +457,16 @@ function parseScore(value) {
   return Number.isFinite(numeric) ? numeric : Number.NEGATIVE_INFINITY;
 }
 
+function normalizeSelectionKey(value) {
+  return String(value || "")
+    .trim()
+    .replace(/\s+/g, " ")
+    .toLowerCase();
+}
+
 function autoSelectCandidates(rows, limit) {
   const indexedRows = rows.map((row, index) => ({ row: { ...row }, index }));
-  const selected = indexedRows
+  const rankedRows = indexedRows
     .filter(({ row }) => {
       const label = String(row.label || "").trim().toLowerCase();
       const hasStableReference = Boolean(row.page_url || row.file_name || row.paper_id);
@@ -379,14 +476,27 @@ function autoSelectCandidates(rows, limit) {
       const scoreDiff = parseScore(right.row.final_score) - parseScore(left.row.final_score);
       if (scoreDiff !== 0) return scoreDiff;
       return left.index - right.index;
-    })
-    .slice(0, limit)
-    .map(({ row }) => row);
+    });
 
-  const selectedTitles = new Set(selected.map((row) => row.title));
-  const updatedRows = rows.map((row) => ({
+  const seenTitles = new Set();
+  const selectedEntries = [];
+  for (const entry of rankedRows) {
+    const key = normalizeSelectionKey(entry.row.title);
+    if (!key || seenTitles.has(key)) {
+      continue;
+    }
+    seenTitles.add(key);
+    selectedEntries.push(entry);
+    if (selectedEntries.length >= limit) {
+      break;
+    }
+  }
+
+  const selected = selectedEntries.map(({ row }) => row);
+  const selectedIndexes = new Set(selectedEntries.map(({ index }) => index));
+  const updatedRows = rows.map((row, index) => ({
     ...row,
-    user_select: selectedTitles.has(row.title) ? "yes" : ""
+    user_select: selectedIndexes.has(index) ? "yes" : ""
   }));
 
   return { selected, updatedRows };
